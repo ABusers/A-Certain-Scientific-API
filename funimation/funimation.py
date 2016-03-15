@@ -55,3 +55,4 @@ class Funimation(object):
     @_require_login
     def get_history(self):
         resp = parse(r.get(self.base_url+'history/get-items/?',headers=self.headers).text)
+        return resp
