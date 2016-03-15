@@ -1,2 +1,3 @@
 requests
-defusedxml
+requests_cache
+xmltodict
