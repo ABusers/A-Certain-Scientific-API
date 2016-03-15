@@ -1,4 +1,4 @@
 import xmltodict
 
 def parse(xml):
-    xmltodict.parse(xml)
+    return xmltodict.parse(xml)
