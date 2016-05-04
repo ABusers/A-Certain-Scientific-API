@@ -121,7 +121,4 @@ class HTTPClient(object):
         return req
 
     def _build_url(self, uri):
-        if uri[0] == '/':
-            return self.host + uri
-        else:
-            return self.host + '/' + uri
+        return self.host + ('' if uri.beginswith('/') else '/') + uri
