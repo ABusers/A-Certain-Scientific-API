@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-from __future__ import print_function
-import time
+from __future__ import print_function, absolute_import
+
 import collections
-import xml.etree.cElementTree as Et
-from functools import wraps
+import time
 from contextlib import contextmanager
+from functools import wraps
+
+from ._compat import iteritems
 
 __all__ = ['CaseInsensitiveDict', 'etree_to_dict', 'timethis', 'timeblock']
 
@@ -48,35 +50,35 @@ class CaseInsensitiveDict(collections.MutableMapping):
         return CaseInsensitiveDict(self._store.values())
 
 
-def etree_to_dict(xml):
+def etree_to_dict(t):
     """Converts an XML string to a `dict`.
 
     Args:
-        xml (str, Element): The string to convert.
+        t (str, Element): The string to convert.
          keys begining with '@' are attributes and '#text' key is the elements
          text.
 
     Returns:
         dict: The `dict` representation of the XML.
     """
-    t = Et.fromstring(xml) if isinstance(xml, str) else xml
-    d = {t.tag: {} if t.attrib else None}
+    attrib = t.attrib
+    tag = t.tag
+    d = {tag: {} if attrib else None}
     children = list(t)
     if children:
         dd = collections.defaultdict(list)
-        for dc in [etree_to_dict(child) for child in children]:
-            for key, val in dc.iteritems():
-                dd[key].append(val)
-        d = {t.tag: {k: v[0] if len(v) == 1 else v for k, v in dd.iteritems()}}
-    if t.attrib:
-        d[t.tag].update(('@' + k, v) for k, v in t.attrib.iteritems())
-    if t.text:
-        text = t.text.strip()
-        if children or t.attrib:
-            if text:
-                d[t.tag]['#text'] = text
+        for dc in map(etree_to_dict, children):
+            for k, v in iteritems(dc):
+                dd[k].append(v)
+        d = {tag: {k: v[0] if len(v) == 1 else v for k, v in iteritems(dd)}}
+    if attrib:
+        d[tag].update({'@' + k: v for k, v in iteritems(attrib)})
+    text = t.text.strip() if t.text else ''
+    if text:
+        if children or attrib:
+            d[tag]['#text'] = text
         else:
-            d[t.tag] = text
+            d[tag] = text
     return d
 
 
@@ -94,7 +96,7 @@ def timethis(func):
         start = time.time()
         r = func(*args, **kwargs)
         end = time.time()
-        print('{}.{}: {}'.format(func.__module__, func.__name__, end - start))
+        print(u'{}.{}: {}'.format(func.__module__, func.__name__, end - start))
         return r
 
     return wrapper
@@ -112,4 +114,4 @@ def timeblock(label):
         yield
     finally:
         end = time.time()
-        print('{}: {}'.format(label, end - start))
+        print(u'{}: {}'.format(label, end - start))

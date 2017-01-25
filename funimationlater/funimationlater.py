@@ -1,20 +1,13 @@
 # -*- coding: utf-8 -*-
-from __future__ import absolute_import
 from functools import wraps
 
-from funimationlater.error import (UnknowResponse, LoginRequired,
-                                   AuthenticationFailed)
-from funimationlater.http import HTTPClient
-from funimationlater.models import Show
+from .error import (UnknowResponse, LoginRequired, AuthenticationFailed,
+                    DetailedHTTPError, UnknownShow, UnknownEpisode)
+from .httpclient import HTTPClient, HTTPClientBase
+from .models import Show, ShowDetails, EpisodeDetails
+from .constants import ShowTypes, SortBy, SortOrder
 
-__all__ = ['FunimationLater', 'ShowTypes']
-
-
-class ShowTypes(object):
-    SIMULCAST = 'simulcasts'
-    BROADCAST_DUBS = 'broadcast-dubs'
-    SEARCH = 'search'
-    SHOWS = 'shows'
+__all__ = ['FunimationLater']
 
 
 def require_login(func):
@@ -38,19 +31,35 @@ class FunimationLater(object):
     host = 'api-funimation.dadcdigital.com'
     base_path = '/xml'
     protocol = 'https'
+    default_limit = 20
 
-    def __init__(self, username=None, password=None):
-        self.client = HTTPClient(
-            '{}://{}{}'.format(self.protocol, self.host, self.base_path))
+    def __init__(self, username=None, password=None, http_client=None):
+        """
+
+        Args:
+            username (str): The users email address
+            password (str): The password
+            http_client: Must be an instance of HTTPClient
+        """
+        full_url = '{}://{}{}'.format(self.protocol, self.host, self.base_path)
+        if http_client is None:
+            self.client = HTTPClient(full_url)
+        else:
+            # NOTE(Sinap): using assert instead of raise here because we should
+            # never use a client that is not a subclass of HTTPClientBase.
+            assert issubclass(http_client, HTTPClientBase), \
+                'http_client must be a subclass of HTTPClientBase'
+            self.client = http_client(full_url)
         self.logged_in = False
         if username and password:
             self.login(username, password)
 
     def login(self, username, password):
         """Login and set the authentication headers
+
         Args:
-            username (str):
-            password (str):
+            username (str): The users email address
+            password (str): The password
         """
         resp = self.client.post('/auth/login/?',
                                 {'username': username, 'password': password})
@@ -63,78 +72,211 @@ class FunimationLater(object):
     @require_login
     def get_my_queue(self):
         """Get the list of shows in the current users queue
+
         Returns:
-            list[Show]:
+            list[funimationlater.models.Show]:
         """
         resp = self.client.get('/myqueue/get-items/?')
-        if 'watchlist' in resp:
+        if resp['watchlist']['items'] is not None:
             return [Show(x['item'], self.client) for x in
                     resp['watchlist']['items']['item']]
-        raise UnknowResponse(resp)
+        else:
+            return []
+
+    @require_login
+    def add_to_queue(self, show_stub):
+        """Add a show to the current users queue.
+
+        Args:
+            show_stub (str): This is a 3 letter code for the show to add.
+        """
+        self.client.get('myqueue/add/', {'id': show_stub})
+
+    @require_login
+    def remove_from_queue(self, show_stub):
+        """Remove a show from the current users queue.
+
+        Args:
+            show_stub (str): This is a 3 letter code for the show to remove.
+        """
+        self.client.get('myqueue/remove/', {'id': show_stub})
 
     @require_login
     def get_history(self):
+        """Get the history for the current user.
+
+        Returns:
+            list[funimationlater.models.Show]
+
+        Raises:
+            funimationlater.error.UnknowResponse:
+        """
         resp = self.client.get('/history/get-items/?')
         if 'watchlist' in resp:
             return [Show(x['item'], self.client) for x in
                     resp['watchlist']['items']['historyitem']]
         raise UnknowResponse(resp)
 
-    @require_login
-    def get_shows(self, show_type, limit=20, offset=0):
+    def get_shows(self, show_type, sort_by=SortBy.TITLE,
+                  sort_order=SortOrder.DESC, limit=default_limit, offset=0,
+                  **kwargs):
         """
+
         Args:
             show_type (str): simulcasts, broadcast-dubs, genre
+            sort_by (str):
+            sort_order (str):
             offset (int):
             limit (int):
 
         Returns:
-            list([Show]):
+            list[funimationlater.models.Show]:
         """
         resp = self._get_content(
             id=show_type,
-            sort='start_timestamp',
-            sort_direction='desc',
+            sort=sort_by,
+            sort_direction=sort_order,
             itemThemes='dateAddedShow',
             territory='US',
+            role='g',
             offset=offset,
-            limit=limit
+            limit=limit,
+            **kwargs
         )
-        return [Show(x, self.client) for x in resp['items']['item']]
+        return resp
+
+    def get_show(self, show_id):
+        """Get the :class:`funimationlater.models.ShowDetails` for `show_id`.
+
+        Args:
+            show_id (int): The shows numeric ID.
+
+        Returns:
+            funimationlater.models.ShowDetails: Returns None if no show exists.
+
+        Raises:
+            funimationlater.error.UnknownShow:
+        """
+        try:
+            resp = self.client.get('detail/', {'pk': show_id})
+            if resp:
+                return ShowDetails(resp['list2d'], self.client)
+        except DetailedHTTPError:
+            # So we don't need the same code twice, just pass on HTTPError
+            # then raise UnknownShow. If it's a different error it should
+            # raise that error instead.
+            pass
+        raise UnknownShow('Show with ID {} not found'.format(show_id))
+
+    def get_episode(self, show_id, episode_id, audio_type=None):
+        """Get a specific episodes details.
+
+        Args:
+            show_id (int):
+            episode_id (int):
+            audio_type (Optional[str]):
+
+        Returns:
+            funimationlater.models.EpisodeDetails:
+
+        Raises:
+            funimationlater.error.UnknownEpisode:
+        """
+        params = {'id': episode_id, 'show': show_id}
+        if audio_type is not None:
+            params['audio'] = audio_type
+        try:
+            resp = self.client.get('player/', params)
+            if resp:
+                return EpisodeDetails(resp['player'], self.client)
+        except DetailedHTTPError:
+            # See get_episodes note.
+            pass
+        raise UnknownEpisode("Episode ID {} for show {} doesn't exist".format(
+            episode_id, show_id))
 
     def search(self, query):
-        """Perform a search
+        """Perform a search using the API.
 
         Args:
             query (str): The query string
 
         Returns:
-            list: a list of results
+            list[funimationlater.models.Show]: a list of results
         """
-        resp = self._get_content(
-            id=ShowTypes.SEARCH,
-            sort='start_timestamp',
-            sort_direction='desc',
-            itemThemes='dateAddedShow',
-            q=query
-        )['items']
-        # for some reason resp['items'] is a tuple when it finds nothing
-        if isinstance(resp, tuple):
-            return None
+        resp = self.get_shows(ShowTypes.SEARCH, q=query)
+        return resp
+
+    def get_all_shows(self):
+        """Get a list of all shows.
+
+        Returns:
+            List[funimationlater.models.Show]:
+        """
+        # limit=-1 appears to return all shows
+        shows = self.get_shows(ShowTypes.SHOWS, limit=-1)
+        if shows is None:
+            return []
         else:
-            resp = resp['item']
+            return shows
+
+    def get_simulcasts(self):
+        """Get a list of all shows being simulcasted.
+
+        NOTE(Sinap): This doesn't appear to be working. You always get the same
+                     20 shows even if you set the limit or offset higher, the
+                     shows are also old.
+
+        Args:
+
+        Returns:
+            list[funimationlater.models.Show]
+        """
+        shows = self.get_shows(ShowTypes.SIMULCAST)
+        return shows
+
+    def _get_content(self, **kwargs):
+        resp = self.client.get('/longlist/content/page/', kwargs)['items']
+        if not resp or isinstance(resp, (tuple, str)):
+            return None
+        resp = resp['item']
         if isinstance(resp, list):
             return [Show(x, self.client) for x in resp]
         else:
             return [Show(resp, self.client)]
 
-    def get_all_shows(self, limit=20, offset=0):
-        shows = self.get_shows(ShowTypes.SHOWS, limit, offset)
-        return sorted(shows, key=lambda x: x.title)
+    def __iter__(self):
+        """
+        Returns:
+            funimationlater.models.Show:
 
-    def get_simulcasts(self, limit=20, offset=0):
-        return self.get_shows(ShowTypes.SIMULCAST, limit, offset)
+        """
+        offset = 0
+        limit = self.default_limit
+        while True:
+            shows = self.get_shows(ShowTypes.SHOWS, limit=limit, offset=offset)
+            for show in shows:
+                yield show
+            if len(shows) < limit:
+                break
+            offset += limit
 
-    def _get_content(self, **kwargs):
-        resp = self.client.get('/longlist/content/page/', kwargs)
-        return resp
+    def __getitem__(self, item):
+        """
+        Args:
+            item (int): Show ID to get
+
+        Returns:
+            funimationlater.models.ShowDetails:
+        """
+        if isinstance(item, int):
+            try:
+                return self.get_show(item)
+            except DetailedHTTPError:
+                return None
+        # NOTE(Sinap): This would allow you to do api['Cowboy Bebop'] but I'm
+        #              not sure if I should do that because it could be
+        #              confusing if you  can use both the integer index and
+        #              a string
+        # elif isinstance(item, str):
+        #     return self.search(item)
